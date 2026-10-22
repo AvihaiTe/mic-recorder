@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Recorder">
+<title>Mic Mini Recorder</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: one column, a recorder's front panel — input, meter, transport, takes. */
+:root {
+  --bg: #eef0f2;
+  --panel: #ffffff;
+  --fg: #1b1f24;
+  --muted: #5d6670;
+  --line: #d5dae0;
+  --tally: #d62f2f;
+  --ok: #2f8f5b;
+  --warn: #c98a12;
+  --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #15181c; --panel: #1f242a; --fg: #e8ebee; --muted: #9aa4ae; --line: #323941; --tally: #ff4d4d; --ok: #4cc47f; --warn: #f0b33a; color-scheme: dark; }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--fg); font: 15px/1.5 var(--sans);
+  padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  -webkit-tap-highlight-color: transparent;
+}
+main { max-width: 560px; margin: 0 auto; padding-block: 20px 40px; display: grid; gap: 14px; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+h1 { font-size: 20px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+.pill { font: 500 12px/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; padding: 7px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.pill[data-s="armed"] { color: var(--ok); border-color: var(--ok); }
+.pill[data-s="rec"] { color: #fff; background: var(--tally); border-color: var(--tally); }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; display: grid; gap: 12px; min-width: 0; }
+.label { font: 500 11px/1 var(--mono); text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); }
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+select, button { font: 500 15px/1 var(--sans); color: var(--fg); }
+select { flex: 1 1 200px; min-width: 0; padding: 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); }
+button { padding: 12px 16px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); cursor: pointer; }
+button:focus-visible, select:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+button:disabled { opacity: 0.45; cursor: default; }
+dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; }
+dt { color: var(--muted); }
+dd { margin: 0; font: 14px/1.5 var(--mono); font-variant-numeric: tabular-nums; min-width: 0; overflow-wrap: anywhere; }
+dd.ok { color: var(--ok); } dd.warn { color: var(--warn); }
+canvas { width: 100%; height: 46px; display: block; }
+.transport { display: grid; justify-items: center; gap: 10px; padding-block: 8px; }
+#rec { width: 84px; height: 84px; border-radius: 50%; padding: 0; border: 3px solid var(--line); background: var(--panel); display: grid; place-items: center; }
+#rec span { width: 34px; height: 34px; border-radius: 50%; background: var(--tally); transition: border-radius .15s, width .15s, height .15s; }
+#rec.on span { width: 28px; height: 28px; border-radius: 5px; }
+#timer { font: 500 30px/1 var(--mono); font-variant-numeric: tabular-nums; letter-spacing: 0.02em; }
+#msg { margin: 0; color: var(--muted); font-size: 14px; text-align: center; min-height: 1.5em; }
+#msg.err { color: var(--tally); }
+ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+#takes li { display: grid; gap: 8px; padding-top: 12px; border-top: 1px solid var(--line); }
+#takes li:first-child { border-top: 0; padding-top: 0; }
+.take-head { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.take-name { font-weight: 600; }
+.take-meta { font: 13px/1.4 var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+audio { width: 100%; }
+.empty { color: var(--muted); margin: 0; }
+.notes { color: var(--muted); font-size: 13.5px; margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+@media (prefers-reduced-motion: reduce) { #rec span { transition: none; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Mic Mini Recorder</h1>
+    <span class="pill" id="state" data-s="off">Mic off</span>
+  </header>
+
+  <section aria-labelledby="in-label">
+    <span class="label" id="in-label">Input</span>
+    <div class="row">
+      <select id="device" aria-label="Microphone" disabled><option>Turn the mic on to list inputs</option></select>
+      <button id="arm" type="button">Turn mic on</button>
+    </div>
+    <dl>
+      <dt>Using</dt><dd id="r-label">—</dd>
+      <dt>Mic rate</dt><dd id="r-mic">—</dd>
+      <dt>File rate</dt><dd id="r-file">—</dd>
+      <dt>Processing</dt><dd id="r-proc">—</dd>
+    </dl>
+  </section>
+
+  <section aria-label="Level">
+    <span class="label">Level · dBFS peak</span>
+    <canvas id="meter" aria-hidden="true"></canvas>
+  </section>
+
+  <section class="transport" aria-label="Record">
+    <button id="rec" type="button" aria-label="Record" disabled><span></span></button>
+    <div id="timer">00:00:00</div>
+    <p id="msg" role="status">Turn the mic on. It stays live between takes, so nothing at the start gets cut.</p>
+  </section>
+
+  <section aria-labelledby="takes-label">
+    <span class="label" id="takes-label">Takes</span>
+    <ol id="takes"></ol>
+    <p class="empty" id="no-takes">No takes yet. Takes live on this page until you save them, so save each one before you close Safari.</p>
+  </section>
+
+  <ul class="notes">
+    <li>Keep the screen on and Safari in front while recording. iPhone pauses web pages in the background.</li>
+    <li>Files are WAV, mono, 16-bit, at the file rate shown above.</li>
+    <li>Mic rate is what the iPhone reports for the input. Amber means below 44.1 kHz, the CD-quality minimum.</li>
+  </ul>
+</main>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const ui = { state: $("state"), device: $("device"), arm: $("arm"), rec: $("rec"), timer: $("timer"), msg: $("msg"), takes: $("takes"), noTakes: $("no-takes"), meter: $("meter"),
+    label: $("r-label"), mic: $("r-mic"), file: $("r-file"), proc: $("r-proc") };
+
+  let stream = null, ctx = null, proc = null, src = null;
+  let recording = false, chunks = [], frames = 0, startedAt = 0, hiddenDuringTake = false;
+  let peak = 0, hold = 0, holdUntil = 0, clipUntil = 0;
+  let takeCount = 0, unsaved = 0, wakeLock = null;
+
+  const say = (text, err) => { ui.msg.textContent = text; ui.msg.classList.toggle("err", !!err); };
+  const setState = (s, text) => { ui.state.dataset.s = s; ui.state.textContent = text; };
+  const kHz = r => r ? (r / 1000).toFixed(r % 1000 ? 1 : 0) + " kHz" : "not reported";
+  const clock = sec => { sec = Math.floor(sec); const h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60, s = sec % 60; return [h, m, s].map(n => String(n).padStart(2, "0")).join(":"); };
+  const mb = bytes => (bytes / 1048576).toFixed(1) + " MB";
+
+  function explain(e) {
+    if (e && e.name === "NotAllowedError") return "Safari blocked the microphone. Tap aA in the address bar → Website Settings → Microphone → Allow, then reload.";
+    if (e && e.name === "NotFoundError") return "No microphone found. Check the DJI is on and connected in Settings → Bluetooth.";
+    if (!window.isSecureContext) return "This page must be opened over https:// for the microphone to work.";
+    return "The microphone did not start: " + (e && e.message ? e.message : e);
+  }
+
+  async function listDevices(currentId) {
+    const all = await navigator.mediaDevices.enumerateDevices();
+    const inputs = all.filter(d => d.kind === "audioinput");
+    ui.device.innerHTML = "";
+    inputs.forEach((d, i) => {
+      const o = document.createElement("option");
+      o.value = d.deviceId; o.textContent = d.label || "Input " + (i + 1);
+      if (d.deviceId === currentId) o.selected = true;
+      ui.device.appendChild(o);
+    });
+    ui.device.disabled = recording || inputs.length === 0;
+  }
+
+  function disarm() {
+    if (proc) { proc.onaudioprocess = null; try { proc.disconnect(); } catch (_) {} }
+    if (src) { try { src.disconnect(); } catch (_) {} }
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    if (ctx) ctx.close().catch(() => {});
+    stream = ctx = proc = src = null;
+  }
+
+  async function arm(deviceId) {
+    disarm();
+    const audio = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 };
+    if (deviceId) audio.deviceId = { exact: deviceId };
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio });
+    } catch (e) {
+      if (deviceId && e.name === "OverconstrainedError") return arm(null);
+      setState("off", "Mic off"); say(explain(e), true); return;
+    }
+    const track = stream.getAudioTracks()[0];
+    const set = track.getSettings ? track.getSettings() : {};
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    await ctx.resume();
+    src = ctx.createMediaStreamSource(stream);
+    proc = ctx.createScriptProcessor(4096, 1, 1);
+    proc.onaudioprocess = onAudio;
+    src.connect(proc); proc.connect(ctx.destination);
+
+    ui.label.textContent = track.label || "Unnamed input";
+    ui.mic.textContent = kHz(set.sampleRate);
+    ui.mic.className = set.sampleRate ? (set.sampleRate >= 44100 ? "ok" : "warn") : "";
+    ui.file.textContent = kHz(ctx.sampleRate);
+    const procOn = ["echoCancellation", "noiseSuppression", "autoGainControl"].filter(k => set[k]);
+    ui.proc.textContent = procOn.length ? "on: " + procOn.join(", ") : "off";
+    ui.proc.className = procOn.length ? "warn" : "ok";
+
+    await listDevices(set.deviceId);
+    ui.arm.textContent = "Restart mic";
+    ui.rec.disabled = false;
+    setState("armed", "Live");
+    say("Mic is live. Tap the red button to record.");
+  }
+
+  function onAudio(e) {
+    const input = e.inputBuffer.getChannelData(0);
+    e.outputBuffer.getChannelData(0).fill(0);
+    let p = 0;
+    for (let i = 0; i < input.length; i++) { const a = Math.abs(input[i]); if (a > p) p = a; }
+    peak = Math.max(p, peak * 0.85);
+    const now = performance.now();
+    if (p >= hold || now > holdUntil) { hold = p; holdUntil = now + 1500; }
+    if (p >= 0.989) clipUntil = now + 2000;
+    if (!recording) return;
+    const pcm = new Int16Array(input.length);
+    for (let i = 0; i < input.length; i++) { const s = Math.max(-1, Math.min(1, input[i])); pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff; }
+    chunks.push(pcm); frames += pcm.length;
+  }
+
+  function wav(parts, n, rate) {
+    const buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+    const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+    str(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); str(8, "WAVE");
+    str(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    str(36, "data"); v.setUint32(40, n * 2, true);
+    const out = new Int16Array(buf, 44); let o = 0;
+    for (const p of parts) { out.set(p, o); o += p.length; }
+    return new Blob([buf], { type: "audio/wav" });
+  }
+
+  async function startRec() {
+    chunks = []; frames = 0; hiddenDuringTake = false; recording = true; startedAt = performance.now();
+    ui.rec.classList.add("on"); ui.rec.setAttribute("aria-label", "Stop");
+    ui.device.disabled = true; ui.arm.disabled = true;
+    setState("rec", "Rec"); say("Recording.");
+    try { wakeLock = await navigator.wakeLock?.request("screen"); } catch (_) { wakeLock = null; }
+  }
+
+  function stopRec() {
+    recording = false;
+    ui.rec.classList.remove("on"); ui.rec.setAttribute("aria-label", "Record");
+    ui.device.disabled = false; ui.arm.disabled = false;
+    setState("armed", "Live");
+    try { wakeLock?.release(); } catch (_) {} wakeLock = null;
+    if (!frames) { say("Nothing was recorded. Check the level meter moves when you talk.", true); return; }
+    const rate = ctx.sampleRate, blob = wav(chunks, frames, rate);
+    chunks = [];
+    addTake(blob, frames / rate, rate, hiddenDuringTake);
+    say(hiddenDuringTake ? "Saved to the list. Safari went to the background during this take, so it may have a gap." : "Take added below. Save it before closing Safari.", hiddenDuringTake);
+  }
+
+  function addTake(blob, seconds, rate, gap) {
+    takeCount++; unsaved++;
+    const d = new Date(), pad = n => String(n).padStart(2, "0");
+    const stamp = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "_" + pad(d.getHours()) + pad(d.getMinutes());
+    const name = "mic-" + stamp + "_take" + pad(takeCount) + ".wav";
+    const url = URL.createObjectURL(blob);
+    const li = document.createElement("li");
+    li.innerHTML = '<div class="take-head"><span class="take-name"></span><span class="take-meta"></span></div><audio controls preload="metadata"></audio><div class="row"></div>';
+    li.querySelector(".take-name").textContent = "Take " + pad(takeCount);
+    li.querySelector(".take-meta").textContent = clock(seconds) + " · " + kHz(rate) + " · " + mb(blob.size) + (gap ? " · may have a gap" : "");
+    li.querySelector("audio").src = url;
+    const row = li.querySelector(".row");
+    let saved = false;
+    const markSaved = () => { if (!saved) { saved = true; unsaved--; } };
+    const file = new File([blob], name, { type: "audio/wav" });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      const share = document.createElement("button");
+      share.type = "button"; share.textContent = "Save or share";
+      share.onclick = async () => {
+        try { await navigator.share({ files: [file], title: name }); markSaved(); }
+        catch (e) { if (e.name !== "AbortError") say("Sharing failed: " + e.message, true); }
+      };
+      row.appendChild(share);
+    }
+    const dl = document.createElement("a");
+    dl.href = url; dl.download = name; dl.textContent = "Download";
+    dl.style.cssText = "align-self:center;color:inherit";
+    dl.onclick = markSaved;
+    row.appendChild(dl);
+    const del = document.createElement("button");
+    del.type = "button"; del.textContent = "Delete";
+    del.onclick = () => { if (!saved) unsaved--; URL.revokeObjectURL(url); li.remove(); ui.noTakes.hidden = !!ui.takes.children.length; };
+    row.appendChild(del);
+    ui.takes.prepend(li);
+    ui.noTakes.hidden = true;
+  }
+
+  function drawMeter() {
+    const c = ui.meter, dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+    if (c.width !== w * dpr) { c.width = w * dpr; c.height = h * dpr; }
+    const g = c.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+    const css = getComputedStyle(document.documentElement), col = n => css.getPropertyValue(n).trim();
+    const pos = db => Math.max(0, Math.min(1, (db + 60) / 60)) * w;
+    const dbOf = a => a > 0 ? 20 * Math.log10(a) : -Infinity;
+    const barH = 18;
+    g.fillStyle = col("--line"); g.fillRect(0, 0, w, barH);
+    const p = pos(dbOf(peak));
+    g.fillStyle = col("--ok"); g.fillRect(0, 0, Math.min(p, pos(-12)), barH);
+    if (p > pos(-12)) { g.fillStyle = col("--warn"); g.fillRect(pos(-12), 0, Math.min(p, pos(-3)) - pos(-12), barH); }
+    if (p > pos(-3)) { g.fillStyle = col("--tally"); g.fillRect(pos(-3), 0, p - pos(-3), barH); }
+    const hp = pos(dbOf(hold));
+    if (hp > 0) { g.fillStyle = col("--fg"); g.fillRect(Math.min(hp, w - 2), 0, 2, barH); }
+    if (performance.now() < clipUntil) { g.fillStyle = col("--tally"); g.fillRect(w - 6, 0, 6, barH); }
+    g.fillStyle = col("--muted"); g.font = "11px " + col("--mono"); g.textBaseline = "top";
+    [-60, -48, -36, -24, -12, -6, 0].forEach(db => {
+      const x = pos(db); g.fillRect(Math.min(x, w - 1), barH, 1, 5);
+      const t = String(db), tw = g.measureText(t).width;
+      g.fillText(t, Math.max(0, Math.min(w - tw, x - tw / 2)), barH + 8);
+    });
+    if (recording && ctx) ui.timer.textContent = clock(frames / ctx.sampleRate);
+    if (!stream) { peak *= 0.85; hold = 0; }
+    requestAnimationFrame(drawMeter);
+  }
+
+  ui.arm.onclick = () => arm(ui.device.disabled ? null : ui.device.value);
+  ui.device.onchange = () => arm(ui.device.value);
+  ui.rec.onclick = () => recording ? stopRec() : startRec();
+  navigator.mediaDevices?.addEventListener?.("devicechange", () => { if (stream) listDevices(stream.getAudioTracks()[0]?.getSettings?.().deviceId); });
+  document.addEventListener("visibilitychange", () => { if (document.hidden && recording) hiddenDuringTake = true; });
+  window.addEventListener("beforeunload", e => { if (recording || unsaved > 0) { e.preventDefault(); e.returnValue = ""; } });
+  if (!navigator.mediaDevices?.getUserMedia) { ui.arm.disabled = true; say(explain(), true); }
+  requestAnimationFrame(drawMeter);
+})();
+</script>
+</body>
+</html>
