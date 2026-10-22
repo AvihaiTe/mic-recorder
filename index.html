@@ -5,8 +5,9 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="robots" content="noindex">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="Recorder">
-<title>Mic Mini Recorder</title>
+<meta name="apple-mobile-web-app-title" content="Notes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Notes</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
 <style>
@@ -70,13 +71,15 @@ ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
 audio { width: 100%; }
 .empty { color: var(--muted); margin: 0; }
 .notes { color: var(--muted); font-size: 13.5px; margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+#dark-btn { width: 100%; max-width: 320px; }
+#dark { position: fixed; inset: 0; background: #000; z-index: 1000; touch-action: manipulation; -webkit-user-select: none; user-select: none; }
 @media (prefers-reduced-motion: reduce) { #rec span { transition: none; } }
 </style>
 </head>
 <body>
 <main>
   <header>
-    <h1>Mic Mini Recorder</h1>
+    <h1>Notes</h1>
     <span class="pill" id="state" data-s="off">Mic off</span>
   </header>
 
@@ -102,6 +105,7 @@ audio { width: 100%; }
   <section class="transport" aria-label="Record">
     <button id="rec" type="button" aria-label="Record" disabled><span></span></button>
     <div id="timer">00:00:00</div>
+    <button id="dark-btn" type="button" disabled>Record with screen black</button>
     <p id="msg" role="status">Turn the mic on. It stays live between takes, so nothing at the start gets cut.</p>
   </section>
 
@@ -112,16 +116,18 @@ audio { width: 100%; }
   </section>
 
   <ul class="notes">
+    <li>Black screen: the screen goes fully black and recording continues. Double-tap anywhere to bring it back.</li>
     <li>Keep the screen on and Safari in front while recording. iPhone pauses web pages in the background.</li>
     <li>Files are WAV, mono, 16-bit, at the file rate shown above.</li>
     <li>Mic rate is what the iPhone reports for the input. Amber means below 44.1 kHz, the CD-quality minimum.</li>
   </ul>
 </main>
+<div id="dark" hidden></div>
 
 <script>
 (() => {
   const $ = id => document.getElementById(id);
-  const ui = { state: $("state"), device: $("device"), arm: $("arm"), rec: $("rec"), timer: $("timer"), msg: $("msg"), takes: $("takes"), noTakes: $("no-takes"), meter: $("meter"),
+  const ui = { state: $("state"), device: $("device"), arm: $("arm"), rec: $("rec"), darkBtn: $("dark-btn"), dark: $("dark"), timer: $("timer"), msg: $("msg"), takes: $("takes"), noTakes: $("no-takes"), meter: $("meter"),
     label: $("r-label"), mic: $("r-mic"), file: $("r-file"), proc: $("r-proc") };
 
   let stream = null, ctx = null, proc = null, src = null;
@@ -193,6 +199,7 @@ audio { width: 100%; }
     await listDevices(set.deviceId);
     ui.arm.textContent = "Restart mic";
     ui.rec.disabled = false;
+    ui.darkBtn.disabled = false;
     setState("armed", "Live");
     say("Mic is live. Tap the red button to record.");
   }
@@ -228,7 +235,7 @@ audio { width: 100%; }
     chunks = []; frames = 0; hiddenDuringTake = false; recording = true; startedAt = performance.now();
     ui.rec.classList.add("on"); ui.rec.setAttribute("aria-label", "Stop");
     ui.device.disabled = true; ui.arm.disabled = true;
-    setState("rec", "Rec"); say("Recording.");
+    setState("rec", "Rec"); say("Recording."); ui.darkBtn.textContent = "Black screen";
     try { wakeLock = await navigator.wakeLock?.request("screen"); } catch (_) { wakeLock = null; }
   }
 
@@ -236,7 +243,7 @@ audio { width: 100%; }
     recording = false;
     ui.rec.classList.remove("on"); ui.rec.setAttribute("aria-label", "Record");
     ui.device.disabled = false; ui.arm.disabled = false;
-    setState("armed", "Live");
+    setState("armed", "Live"); ui.darkBtn.textContent = "Record with screen black";
     try { wakeLock?.release(); } catch (_) {} wakeLock = null;
     if (!frames) { say("Nothing was recorded. Check the level meter moves when you talk.", true); return; }
     const rate = ctx.sampleRate, blob = wav(chunks, frames, rate);
@@ -312,6 +319,13 @@ audio { width: 100%; }
   ui.arm.onclick = () => arm(ui.device.disabled ? null : ui.device.value);
   ui.device.onchange = () => arm(ui.device.value);
   ui.rec.onclick = () => recording ? stopRec() : startRec();
+  ui.darkBtn.onclick = async () => { ui.dark.hidden = false; if (!recording) await startRec(); };
+  let lastTap = 0;
+  ui.dark.addEventListener("pointerdown", e => {
+    e.preventDefault();
+    const now = performance.now();
+    if (now - lastTap < 450) { ui.dark.hidden = true; lastTap = 0; } else lastTap = now;
+  });
   navigator.mediaDevices?.addEventListener?.("devicechange", () => { if (stream) listDevices(stream.getAudioTracks()[0]?.getSettings?.().deviceId); });
   document.addEventListener("visibilitychange", () => { if (document.hidden && recording) hiddenDuringTake = true; });
   window.addEventListener("beforeunload", e => { if (recording || unsaved > 0) { e.preventDefault(); e.returnValue = ""; } });
