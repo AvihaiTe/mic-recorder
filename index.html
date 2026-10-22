@@ -70,6 +70,7 @@ ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
 .take-meta { font: 13px/1.4 var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
 audio { width: 100%; }
 .empty { color: var(--muted); margin: 0; }
+.take-meta .gap { color: var(--warn); }
 .notes { color: var(--muted); font-size: 13.5px; margin: 0; padding-left: 18px; display: grid; gap: 4px; }
 #dark-btn { width: 100%; max-width: 320px; }
 #dark { position: fixed; inset: 0; background: #000; z-index: 1000; touch-action: manipulation; -webkit-user-select: none; user-select: none; }
@@ -112,12 +113,14 @@ audio { width: 100%; }
   <section aria-labelledby="takes-label">
     <span class="label" id="takes-label">Takes</span>
     <ol id="takes"></ol>
-    <p class="empty" id="no-takes">No takes yet. Takes live on this page until you save them, so save each one before you close Safari.</p>
+    <div class="row" id="save-all-row" hidden><button id="save-all" type="button">Save all new takes</button></div>
+    <p class="empty" id="no-takes">No takes yet. Every take is kept on this phone automatically while it records, even if Safari closes. Tap Save or share to put it in Files.</p>
   </section>
 
   <ul class="notes">
     <li>Black screen: the screen goes fully black and recording continues. Double-tap anywhere to bring it back.</li>
-    <li>Keep the screen on and Safari in front while recording. iPhone pauses web pages in the background.</li>
+    <li>Takes are kept on this phone as you record. If Safari closes mid-take, the audio up to that point is waiting here next time.</li>
+    <li>If iPhone pauses the page in the background, the take says how long the audio stopped for.</li>
     <li>Files are WAV, mono, 16-bit, at the file rate shown above.</li>
     <li>Mic rate is what the iPhone reports for the input. Amber means below 44.1 kHz, the CD-quality minimum.</li>
   </ul>
@@ -127,13 +130,57 @@ audio { width: 100%; }
 <script>
 (() => {
   const $ = id => document.getElementById(id);
-  const ui = { state: $("state"), device: $("device"), arm: $("arm"), rec: $("rec"), darkBtn: $("dark-btn"), dark: $("dark"), timer: $("timer"), msg: $("msg"), takes: $("takes"), noTakes: $("no-takes"), meter: $("meter"),
+  const ui = { state: $("state"), device: $("device"), arm: $("arm"), rec: $("rec"), darkBtn: $("dark-btn"), dark: $("dark"), timer: $("timer"), msg: $("msg"), takes: $("takes"), noTakes: $("no-takes"), saveAll: $("save-all"), saveAllRow: $("save-all-row"), meter: $("meter"),
     label: $("r-label"), mic: $("r-mic"), file: $("r-file"), proc: $("r-proc") };
 
   let stream = null, ctx = null, proc = null, src = null;
-  let recording = false, chunks = [], frames = 0, startedAt = 0, hiddenDuringTake = false;
+  let recording = false, pending = [], frames = 0, seq = 0, take = null, deviceId = null;
   let peak = 0, hold = 0, holdUntil = 0, clipUntil = 0;
-  let takeCount = 0, unsaved = 0, wakeLock = null;
+  let wakeLock = null;
+  const views = new Map();
+  const pad = n => String(n).padStart(2, "0");
+
+  // Storage: every take is written to IndexedDB in pieces while it records.
+  let dbp = null;
+  function db() {
+    if (!dbp) dbp = new Promise((res, rej) => {
+      const r = indexedDB.open("notes-rec", 1);
+      r.onupgradeneeded = () => {
+        r.result.createObjectStore("takes", { keyPath: "id" });
+        r.result.createObjectStore("chunks", { autoIncrement: true }).createIndex("take", "take");
+      };
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+    });
+    return dbp;
+  }
+  const done = rq => new Promise((res, rej) => { rq.onsuccess = () => res(rq.result); rq.onerror = () => rej(rq.error); });
+  async function store(name, mode) { return (await db()).transaction(name, mode).objectStore(name); }
+  async function putTake(t) { try { await done((await store("takes", "readwrite")).put(t)); } catch (e) { storageFailed(e); } }
+  async function flush() {
+    if (!take || !pending.length) return;
+    const n = pending.reduce((a, p) => a + p.length, 0), pcm = new Int16Array(n); let o = 0;
+    for (const p of pending) { pcm.set(p, o); o += p.length; }
+    pending = [];
+    take.seconds = frames / take.rate; take.wallSeconds = (Date.now() - take.created) / 1000;
+    try {
+      const t = (await db()).transaction(["chunks", "takes"], "readwrite");
+      t.objectStore("chunks").add({ take: take.id, seq: seq++, pcm: pcm.buffer });
+      t.objectStore("takes").put(take);
+      await new Promise((res, rej) => { t.oncomplete = res; t.onerror = () => rej(t.error); });
+    } catch (e) { storageFailed(e); }
+  }
+  async function readPcm(id) {
+    const rows = await done((await store("chunks", "readonly")).index("take").getAll(id));
+    return rows.sort((a, b) => a.seq - b.seq).map(r => new Int16Array(r.pcm));
+  }
+  async function dropTake(id) {
+    const s = await store("chunks", "readwrite");
+    const keys = await done(s.index("take").getAllKeys(id));
+    await Promise.all(keys.map(k => done(s.delete(k))));
+    await done((await store("takes", "readwrite")).delete(id));
+  }
+  let warnedStorage = false;
+  function storageFailed(e) { if (!warnedStorage) { warnedStorage = true; say("This take could not be kept on the phone (" + (e && e.name || "storage error") + "). Save it right after you stop.", true); } }
 
   const say = (text, err) => { ui.msg.textContent = text; ui.msg.classList.toggle("err", !!err); };
   const setState = (s, text) => { ui.state.dataset.s = s; ui.state.textContent = text; };
@@ -181,6 +228,8 @@ audio { width: 100%; }
     }
     const track = stream.getAudioTracks()[0];
     const set = track.getSettings ? track.getSettings() : {};
+    deviceId = set.deviceId || deviceId;
+    track.onended = () => { if (recording) stopRec("The mic disconnected. What was recorded until then is kept below."); setState("off", "Mic off"); };
     ctx = new (window.AudioContext || window.webkitAudioContext)();
     await ctx.resume();
     src = ctx.createMediaStreamSource(stream);
@@ -216,7 +265,7 @@ audio { width: 100%; }
     if (!recording) return;
     const pcm = new Int16Array(input.length);
     for (let i = 0; i < input.length; i++) { const s = Math.max(-1, Math.min(1, input[i])); pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff; }
-    chunks.push(pcm); frames += pcm.length;
+    pending.push(pcm); frames += pcm.length;
   }
 
   function wav(parts, n, rate) {
@@ -232,61 +281,111 @@ audio { width: 100%; }
   }
 
   async function startRec() {
-    chunks = []; frames = 0; hiddenDuringTake = false; recording = true; startedAt = performance.now();
+    const d = new Date();
+    const count = ui.takes.children.length + 1;
+    take = { id: d.getTime(), created: d.getTime(), rate: ctx.sampleRate, seconds: 0, wallSeconds: 0, done: false, saved: false,
+      name: "mic-" + d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "_" + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds()) + ".wav",
+      label: "Take " + pad(count) };
+    pending = []; frames = 0; seq = 0; recording = true;
+    await putTake(take);
     ui.rec.classList.add("on"); ui.rec.setAttribute("aria-label", "Stop");
     ui.device.disabled = true; ui.arm.disabled = true;
-    setState("rec", "Rec"); say("Recording."); ui.darkBtn.textContent = "Black screen";
+    setState("rec", "Rec"); say("Recording. Kept on this phone as it goes."); ui.darkBtn.textContent = "Black screen";
     try { wakeLock = await navigator.wakeLock?.request("screen"); } catch (_) { wakeLock = null; }
   }
 
-  function stopRec() {
+  async function stopRec(note) {
+    if (!recording) return;
     recording = false;
     ui.rec.classList.remove("on"); ui.rec.setAttribute("aria-label", "Record");
     ui.device.disabled = false; ui.arm.disabled = false;
-    setState("armed", "Live"); ui.darkBtn.textContent = "Record with screen black";
+    setState(stream ? "armed" : "off", stream ? "Live" : "Mic off"); ui.darkBtn.textContent = "Record with screen black";
     try { wakeLock?.release(); } catch (_) {} wakeLock = null;
-    if (!frames) { say("Nothing was recorded. Check the level meter moves when you talk.", true); return; }
-    const rate = ctx.sampleRate, blob = wav(chunks, frames, rate);
-    chunks = [];
-    addTake(blob, frames / rate, rate, hiddenDuringTake);
-    say(hiddenDuringTake ? "Saved to the list. Safari went to the background during this take, so it may have a gap." : "Take added below. Save it before closing Safari.", hiddenDuringTake);
+    const t = take;
+    await flush();
+    take = null;
+    t.done = true; t.seconds = frames / t.rate; t.wallSeconds = (Date.now() - t.created) / 1000;
+    if (!frames) { await dropTake(t.id).catch(() => {}); say("Nothing was recorded. Check the level meter moves when you talk.", true); return; }
+    await putTake(t);
+    const gap = t.wallSeconds - t.seconds;
+    showTake(t, await readPcm(t.id).catch(() => []));
+    say(note || (gap > 2 ? "Take kept. The audio stopped for " + clock(gap) + " while Safari was in the background." : "Take kept on this phone. Tap Save or share to put it in Files."), !!note || gap > 2);
   }
 
-  function addTake(blob, seconds, rate, gap) {
-    takeCount++; unsaved++;
-    const d = new Date(), pad = n => String(n).padStart(2, "0");
-    const stamp = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "_" + pad(d.getHours()) + pad(d.getMinutes());
-    const name = "mic-" + stamp + "_take" + pad(takeCount) + ".wav";
-    const url = URL.createObjectURL(blob);
+  function showTake(t, parts) {
+    const n = parts.reduce((a, p) => a + p.length, 0);
+    if (!n) return;
+    const blob = wav(parts, n, t.rate), url = URL.createObjectURL(blob);
+    const file = new File([blob], t.name, { type: "audio/wav" });
     const li = document.createElement("li");
     li.innerHTML = '<div class="take-head"><span class="take-name"></span><span class="take-meta"></span></div><audio controls preload="metadata"></audio><div class="row"></div>';
-    li.querySelector(".take-name").textContent = "Take " + pad(takeCount);
-    li.querySelector(".take-meta").textContent = clock(seconds) + " · " + kHz(rate) + " · " + mb(blob.size) + (gap ? " · may have a gap" : "");
+    li.querySelector(".take-name").textContent = t.label;
+    const meta = li.querySelector(".take-meta");
+    meta.textContent = clock(n / t.rate) + " · " + kHz(t.rate) + " · " + mb(blob.size);
+    const gap = t.wallSeconds - n / t.rate;
+    const notes = [];
+    if (gap > 2) notes.push("audio stopped for " + clock(gap));
+    if (t.recovered) notes.push("recovered after Safari closed");
+    if (notes.length) { const g = document.createElement("span"); g.className = "gap"; g.textContent = " · " + notes.join(" · "); meta.appendChild(g); }
     li.querySelector("audio").src = url;
     const row = li.querySelector(".row");
-    let saved = false;
-    const markSaved = () => { if (!saved) { saved = true; unsaved--; } };
-    const file = new File([blob], name, { type: "audio/wav" });
+    const view = { t, file, li };
+    views.set(t.id, view);
+    const markSaved = () => { if (!t.saved) { t.saved = true; putTake(t); refreshSaveAll(); } };
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
       const share = document.createElement("button");
       share.type = "button"; share.textContent = "Save or share";
       share.onclick = async () => {
-        try { await navigator.share({ files: [file], title: name }); markSaved(); }
+        try { await navigator.share({ files: [file] }); markSaved(); }
         catch (e) { if (e.name !== "AbortError") say("Sharing failed: " + e.message, true); }
       };
       row.appendChild(share);
     }
     const dl = document.createElement("a");
-    dl.href = url; dl.download = name; dl.textContent = "Download";
+    dl.href = url; dl.download = t.name; dl.textContent = "Download";
     dl.style.cssText = "align-self:center;color:inherit";
     dl.onclick = markSaved;
     row.appendChild(dl);
     const del = document.createElement("button");
     del.type = "button"; del.textContent = "Delete";
-    del.onclick = () => { if (!saved) unsaved--; URL.revokeObjectURL(url); li.remove(); ui.noTakes.hidden = !!ui.takes.children.length; };
+    let armed = false;
+    del.onclick = async () => {
+      if (!t.saved && !armed) { armed = true; del.textContent = "Not saved yet. Tap again to delete"; setTimeout(() => { armed = false; del.textContent = "Delete"; }, 4000); return; }
+      await dropTake(t.id).catch(() => {});
+      URL.revokeObjectURL(url); li.remove(); views.delete(t.id);
+      ui.noTakes.hidden = !!ui.takes.children.length; refreshSaveAll();
+    };
     row.appendChild(del);
     ui.takes.prepend(li);
     ui.noTakes.hidden = true;
+    refreshSaveAll();
+  }
+
+  function refreshSaveAll() {
+    const n = [...views.values()].filter(v => !v.t.saved).length;
+    ui.saveAllRow.hidden = n < 2 || !navigator.canShare;
+    ui.saveAll.textContent = "Save all " + n + " new takes";
+  }
+
+  async function saveAll() {
+    const vs = [...views.values()].filter(v => !v.t.saved);
+    const files = vs.map(v => v.file);
+    if (!files.length || !navigator.canShare({ files })) { say("This iPhone can't share these together. Save them one by one.", true); return; }
+    try { await navigator.share({ files }); vs.forEach(v => { v.t.saved = true; putTake(v.t); }); refreshSaveAll(); }
+    catch (e) { if (e.name !== "AbortError") say("Sharing failed: " + e.message, true); }
+  }
+
+  async function loadTakes() {
+    let all;
+    try { all = await done((await store("takes", "readonly")).getAll()); } catch (e) { return; }
+    all.sort((a, b) => a.created - b.created);
+    for (const t of all) {
+      const parts = await readPcm(t.id).catch(() => []);
+      if (!parts.length) { await dropTake(t.id).catch(() => {}); continue; }
+      if (!t.done) { t.done = true; t.recovered = true; t.seconds = parts.reduce((a, p) => a + p.length, 0) / t.rate; t.wallSeconds = t.seconds; await putTake(t); }
+      showTake(t, parts);
+    }
+    navigator.storage?.persist?.().catch(() => {});
   }
 
   function drawMeter() {
@@ -319,6 +418,8 @@ audio { width: 100%; }
   ui.arm.onclick = () => arm(ui.device.disabled ? null : ui.device.value);
   ui.device.onchange = () => arm(ui.device.value);
   ui.rec.onclick = () => recording ? stopRec() : startRec();
+  ui.saveAll.onclick = saveAll;
+  setInterval(() => { if (recording) flush(); }, 2000);
   ui.darkBtn.onclick = async () => { ui.dark.hidden = false; if (!recording) await startRec(); };
   let lastTap = 0;
   ui.dark.addEventListener("pointerdown", e => {
@@ -327,10 +428,16 @@ audio { width: 100%; }
     if (now - lastTap < 450) { ui.dark.hidden = true; lastTap = 0; } else lastTap = now;
   });
   navigator.mediaDevices?.addEventListener?.("devicechange", () => { if (stream) listDevices(stream.getAudioTracks()[0]?.getSettings?.().deviceId); });
-  document.addEventListener("visibilitychange", () => { if (document.hidden && recording) hiddenDuringTake = true; });
-  window.addEventListener("beforeunload", e => { if (recording || unsaved > 0) { e.preventDefault(); e.returnValue = ""; } });
+  document.addEventListener("visibilitychange", async () => {
+    if (document.hidden) { if (recording) flush(); return; }
+    if (ctx && ctx.state !== "running") ctx.resume().catch(() => {});
+    if (stream && stream.getAudioTracks()[0]?.readyState === "ended") await arm(deviceId);
+  });
+  window.addEventListener("pagehide", () => { if (recording) flush(); });
+  window.addEventListener("beforeunload", e => { if (recording) { flush(); e.preventDefault(); e.returnValue = ""; } });
   if (!navigator.mediaDevices?.getUserMedia) { ui.arm.disabled = true; say(explain(), true); }
   requestAnimationFrame(drawMeter);
+  loadTakes();
 })();
 </script>
 </body>
